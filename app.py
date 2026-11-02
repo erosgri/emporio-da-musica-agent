@@ -32,10 +32,10 @@ st.caption("Sua música começa aqui.")
 with st.sidebar:
     st.subheader("Configuração")
     supplied_key = st.text_input(
-        "OpenAI API Key",
+        "API Key",
         type="password",
         value="",
-        help="Usada somente durante esta sessão. Prefira configurar OPENAI_API_KEY no .env.",
+        help="Chave do provedor configurado no .env (OpenAI ou Gemini). Prefira OPENAI_API_KEY.",
     )
     if st.button("Limpar conversa", use_container_width=True):
         st.session_state.messages = []
@@ -43,6 +43,10 @@ with st.sidebar:
     st.markdown(
         "O assistente consulta o catálogo e o manual da loja. "
         "Ele não realiza compras, cancelamentos ou reembolsos."
+    )
+    st.caption(
+        "Para testar de graça, use Gemini no `.env`. "
+        "Veja a seção de teste gratuito no README."
     )
 
 api_key = settings.openai_api_key or supplied_key.strip() or None

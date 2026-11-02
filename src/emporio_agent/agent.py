@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, AuthenticationError, OpenAI, RateLimitError
 from pydantic import ValidationError
 
 from emporio_agent.config import Settings
@@ -73,10 +73,10 @@ class EmporioAgent:
             raise AgentError("OPENAI_API_KEY não configurada.")
         self.settings = settings
         self.tools = tools
-        self.client = client or OpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-        )
+        client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
+        if settings.openai_base_url:
+            client_kwargs["base_url"] = settings.openai_base_url
+        self.client = client or OpenAI(**client_kwargs)
 
     def chat(
         self,
@@ -98,21 +98,22 @@ class EmporioAgent:
         validation_retry_used = False
 
         for _round in range(self.settings.max_tool_rounds + 1):
-            completion = self.client.chat.completions.create(  # type: ignore[call-overload]
-                model=self.settings.model,
-                messages=messages,
-                tools=self.tools.openai_definitions(),
-                tool_choice="auto",
-                temperature=0.1,
-                response_format={
-                    "type": "json_schema",
-                    "json_schema": {
-                        "name": "grounded_response",
-                        "strict": False,
-                        "schema": GroundedResponse.model_json_schema(),
-                    },
-                },
-            )
+            try:
+                completion = self.client.chat.completions.create(
+                    **self._completion_kwargs(messages),
+                )
+            except AuthenticationError as error:
+                raise AgentError("A chave configurada foi recusada pelo provedor.") from error
+            except RateLimitError as error:
+                raise AgentError(
+                    "A conta do provedor está sem créditos ou atingiu o limite de uso."
+                ) from error
+            except APIConnectionError as error:
+                raise AgentError("Não foi possível conectar ao provedor do modelo.") from error
+            except APIStatusError as error:
+                raise AgentError(
+                    f"O provedor do modelo retornou um erro HTTP {error.status_code}."
+                ) from error
             message = completion.choices[0].message
 
             if message.tool_calls:
@@ -120,10 +121,10 @@ class EmporioAgent:
                 if total_tool_calls > self.settings.max_tool_calls:
                     return self._fallback("O limite seguro de consultas foi atingido.")
 
-                messages.append(message.model_dump(exclude_none=True))
+                messages.append(self._assistant_tool_message(message))
                 for call in message.tool_calls:
                     try:
-                        arguments = json.loads(call.function.arguments)
+                        arguments = self._parse_tool_arguments(call.function.arguments)
                         result = self.tools.execute(
                             call.function.name,
                             arguments,
@@ -152,7 +153,11 @@ class EmporioAgent:
 
             content = message.content or ""
             try:
-                response = GroundedResponse.model_validate_json(content)
+                response = self._parse_grounded_response(
+                    content,
+                    allowed_evidence=allowed_evidence,
+                    require_schema=self.settings.uses_structured_output,
+                )
                 self._validate_grounding(response, allowed_evidence, clean_message)
                 return response
             except (ValidationError, AgentError) as error:
@@ -173,6 +178,81 @@ class EmporioAgent:
                 )
 
         return self._fallback("Não foi possível concluir a consulta dentro do limite seguro.")
+
+    def _completion_kwargs(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.settings.model,
+            "messages": messages,
+            "tools": self.tools.openai_definitions(),
+            "tool_choice": "auto",
+            "temperature": 0.1,
+        }
+        if self.settings.uses_structured_output:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "grounded_response",
+                    "strict": False,
+                    "schema": GroundedResponse.model_json_schema(),
+                },
+            }
+        return payload
+
+    @staticmethod
+    def _assistant_tool_message(message: Any) -> dict[str, Any]:
+        payload = message.model_dump(exclude_none=True)
+        for call in payload.get("tool_calls") or []:
+            function = call.get("function") or {}
+            arguments = function.get("arguments")
+            if arguments is not None and not isinstance(arguments, str):
+                function["arguments"] = json.dumps(arguments, ensure_ascii=False, default=str)
+        return payload
+
+    @staticmethod
+    def _parse_tool_arguments(raw_arguments: Any) -> dict[str, Any]:
+        if raw_arguments in (None, ""):
+            return {}
+        if isinstance(raw_arguments, dict):
+            return raw_arguments
+        parsed = json.loads(raw_arguments)
+        if not isinstance(parsed, dict):
+            raise ValueError("Argumentos da ferramenta devem ser um objeto JSON.")
+        return parsed
+
+    @staticmethod
+    def _parse_grounded_response(
+        content: str,
+        *,
+        allowed_evidence: dict[str, EvidenceRef] | None = None,
+        require_schema: bool = True,
+    ) -> GroundedResponse:
+        text = content.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            candidate = text[start : end + 1]
+            try:
+                payload = json.loads(candidate)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                payload.setdefault("skill", "continuidade_da_conversa")
+                if "evidence_refs" not in payload and allowed_evidence:
+                    payload["evidence_refs"] = [
+                        reference.model_dump() for reference in allowed_evidence.values()
+                    ]
+                return GroundedResponse.model_validate(payload)
+
+        if not require_schema and text and allowed_evidence:
+            return GroundedResponse(
+                answer=text[:4000],
+                skill="continuidade_da_conversa",
+                evidence_refs=list(allowed_evidence.values()),
+            )
+        return GroundedResponse.model_validate_json(text)
 
     @staticmethod
     def _safe_history(history: Sequence[dict[str, str]]) -> list[dict[str, str]]:
