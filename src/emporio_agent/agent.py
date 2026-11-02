@@ -200,7 +200,10 @@ class EmporioAgent:
 
     @staticmethod
     def _assistant_tool_message(message: Any) -> dict[str, Any]:
-        payload = message.model_dump(exclude_none=True)
+        dumped = message.model_dump(exclude_none=True)
+        if not isinstance(dumped, dict):
+            raise TypeError("A mensagem da ferramenta deve ser um objeto JSON.")
+        payload: dict[str, Any] = {str(key): value for key, value in dumped.items()}
         for call in payload.get("tool_calls") or []:
             function = call.get("function") or {}
             arguments = function.get("arguments")
