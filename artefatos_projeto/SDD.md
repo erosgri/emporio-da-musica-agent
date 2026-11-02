@@ -924,6 +924,45 @@ Cenários mínimos:
 9. Tentativa de obter dados de outro cliente.
 10. Instrução maliciosa presente na mensagem do usuário.
 
+### 16.4 Automação dos testes
+
+A suíte será executada automaticamente com `pytest` e organizada por responsabilidade:
+
+- `test_catalog.py`: filtros, disponibilidade, estoque e status.
+- `test_commerce.py`: promoções, PIX, arredondamento e parcelamento.
+- `test_orders.py`: validação de identidade e consulta segura.
+- `test_policy.py`: recuperação e ausência de evidências no RAG.
+- `test_tools.py`: contratos e referências das ferramentas.
+- `test_guardrails.py`: obrigatoriedade e validação das evidências.
+
+Comandos locais:
+
+```bash
+python -m pytest --cov=emporio_agent --cov-report=term-missing --cov-fail-under=75
+python -m ruff check .
+python -m mypy src
+```
+
+O GitHub Actions deverá executar os três comandos em cada `push` e `pull_request`.
+
+Critérios obrigatórios para aprovação:
+
+- Todos os testes aprovados.
+- Cobertura global mínima de 75%.
+- Nenhum erro de lint.
+- Nenhum erro de tipagem estática.
+- Nenhum segredo ou arquivo `.env` versionado.
+
+### 16.5 Estado atual da suíte
+
+Na versão 0.1:
+
+- 18 testes automatizados estão implementados.
+- A cobertura global medida é de 78%.
+- A ingestão real dos CSVs e do PDF participa dos testes de integração.
+- Chamadas reais ao provedor não são executadas nos testes.
+- O ciclo completo de function calling com cliente OpenAI simulado permanece como evolução.
+
 ## 17. Estrutura proposta
 
 ```text
